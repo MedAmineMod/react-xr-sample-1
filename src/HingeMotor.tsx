@@ -1,0 +1,309 @@
+import {
+  createContext,
+  createRef,
+  forwardRef,
+  Suspense,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from 'react'
+import { Canvas, useFrame } from '@react-three/fiber'
+import { Physics, usePlane, useBox, useHingeConstraint, useLockConstraint } from '@react-three/cannon'
+import { PerspectiveCamera, OrbitControls } from '@react-three/drei'
+import { Vector3 } from 'three'
+
+import type { BoxProps, HingeConstraintOpts, PlaneProps, Triplet } from '@react-three/cannon'
+import type { PlaneBufferGeometryProps, MeshStandardMaterialProps } from '@react-three/fiber'
+import type { PropsWithChildren, RefObject } from 'react'
+import type { Object3D, PerspectiveCamera as Cam } from 'three'
+
+function normalizeSize([px = 0, py = 0, pz = 0]): (scale: Triplet) => Triplet {
+  return ([ox = 1, oy = 1, oz = 1]) => [px * ox, py * oy, pz * oz]
+}
+
+const GROUP_GROUND = 2 ** 0
+const GROUP_BODY = 2 ** 1
+
+type OurPlaneProps = Pick<PlaneBufferGeometryProps, 'args'> & Pick<PlaneProps, 'position' | 'rotation'>
+
+function Plane({ args, ...props }: OurPlaneProps) {
+  const [ref] = usePlane(() => ({ type: 'Static', collisionFilterGroup: GROUP_GROUND, ...props }))
+  return (
+    <group ref={ref}>
+      <mesh>
+        <planeBufferGeometry args={args} />
+        <meshBasicMaterial color="#ffb385" />
+      </mesh>
+      <mesh receiveShadow>
+        <planeBufferGeometry args={args} />
+        <shadowMaterial color="lightsalmon" />
+      </mesh>
+    </group>
+  )
+}
+
+const ref = createRef<Object3D>()
+const context = createContext<[bodyRef: RefObject<Object3D>, props: BoxShapeProps]>([ref, {}])
+
+type ConstraintPartProps = PropsWithChildren<
+  {
+    config?: HingeConstraintOpts
+    enableMotor?: boolean
+    motorSpeed?: number
+    parentPivot?: Triplet
+    pivot?: Triplet
+  } & Pick<BoxShapeProps, 'color'> &
+    BoxProps
+> &
+  BoxShapeProps
+
+const ConstraintPart = forwardRef<Object3D | null, ConstraintPartProps>(
+  (
+    {
+      config = {},
+      enableMotor,
+      motorSpeed = 7,
+      color,
+      children,
+      pivot = [0, 0, 0],
+      parentPivot = [0, 0, 0],
+      ...props
+    },
+    ref,
+  ) => {
+    const parent = useContext(context)
+
+    const normParentPivot = parent && parent[1].args ? normalizeSize(parent[1].args) : () => undefined
+    const normPivot = props.args ? normalizeSize(props.args) : () => undefined
+
+    const [bodyRef] = useBox(
+      () => ({
+        collisionFilterGroup: GROUP_BODY,
+        collisionFilterMask: GROUP_GROUND,
+        linearDamping: 0.4,
+        mass: 1,
+        ...props,
+      }),
+      ref,
+    )
+
+    const [, , hingeApi] = useHingeConstraint(bodyRef, parent[0], {
+      collideConnected: false,
+      axisA: [0, 0, 1],
+      axisB: [0, 0, 1],
+      pivotA: normPivot(pivot),
+      pivotB: normParentPivot(parentPivot),
+      ...config,
+    })
+
+    useEffect(() => {
+      if (enableMotor) {
+        hingeApi.enableMotor()
+      } else {
+        hingeApi.disableMotor()
+      }
+    }, [enableMotor])
+
+    useEffect(() => {
+      hingeApi.setMotorSpeed(motorSpeed)
+    }, [motorSpeed])
+
+    return (
+      <context.Provider value={[bodyRef, props]}>
+        <BoxShape ref={bodyRef} {...props} color={color} />
+        {children}
+      </context.Provider>
+    )
+  },
+)
+
+type BoxShapeProps = Pick<MeshStandardMaterialProps, 'color' | 'opacity' | 'transparent'> &
+  Pick<BoxProps, 'args'>
+const BoxShape = forwardRef<Object3D | null, BoxShapeProps>(
+  ({ children, transparent = false, opacity = 1, color = 'white', args = [1, 1, 1], ...props }, ref) => (
+    <mesh receiveShadow castShadow ref={ref} {...props}>
+      <boxBufferGeometry args={args} />
+      <meshStandardMaterial color={color} transparent={transparent} opacity={opacity} />
+      {children}
+    </mesh>
+  ),
+)
+
+export const Robot = forwardRef<Object3D>((props, legsLeftRef) => {
+  const { scale = [1, 1, 1] } = props;
+  const [motorSpeed, setMotorSpeed] = useState(3)
+
+  const legsRightRef = useRef<Object3D>(null)
+
+  useLockConstraint(legsRightRef, legsLeftRef, {})
+
+  return (
+    <group onPointerDown={() => setMotorSpeed(2)} onPointerUp={() => setMotorSpeed(7)}>
+      <Legs ref={legsLeftRef} delay={1000} bodyDepth={3 * scale[0]} motorSpeed={motorSpeed} scale={scale} />
+      <Legs ref={legsRightRef} motorSpeed={motorSpeed} scale={scale} />
+    </group>
+  )
+})
+
+type LegsProps = {
+  bodyDepth?: number
+  delay?: number
+} & Pick<ConstraintPartProps, 'motorSpeed'>
+
+const Legs = forwardRef<Object3D, LegsProps>(({ bodyDepth = 0, delay = 0, motorSpeed = 7, scale }, bodyRef) => {
+  const horizontalRef = useRef<Object3D>(null)
+  const frontLegRef = useRef<Object3D>(null)
+  const frontUpperLegRef = useRef<Object3D>(null)
+  const backLegRef = useRef<Object3D>(null)
+  // const partDepth = 0.3
+  // const bodyWidth = 10
+  // const bodyHeight = 2
+  // const legLength = 6
+
+  // const partDepth = 0.03
+  // const bodyWidth = 1.0
+  // const bodyHeight = 0.2
+  // const legLength = 0.6
+
+  const partDepth = 0.3 * scale[0]
+  const bodyWidth = 10 * scale[0]
+  const bodyHeight = 2 * scale[0]
+  const legLength = 6 * scale[0]
+
+  // const size3 = normalizeSize([1, 3, partDepth])
+  // const size5 = normalizeSize([1, 5, partDepth])
+  // const size10 = normalizeSize([1, 10, partDepth])
+
+  const size3 = normalizeSize([1 * scale[0], 3 * scale[0], partDepth])
+  const size5 = normalizeSize([1 * scale[0], 5 * scale[0], partDepth])
+  const size10 = normalizeSize([1 * scale[0], 10 * scale[0], partDepth])
+
+  // Hinge constraints for triangulations
+  useHingeConstraint(frontUpperLegRef, frontLegRef, {
+    collideConnected: false,
+    axisA: [0, 0, 1],
+    axisB: [0, 0, 1],
+    pivotA: size3([0, 0.5 * scale[0], 0.5 * scale[0]]),
+    pivotB: size5([0, 0.5 * scale[0], -0.5 * scale[0]]),
+  })
+
+  useHingeConstraint(backLegRef, horizontalRef, {
+    collideConnected: false,
+    axisA: [0, 0, 1],
+    axisB: [0, 0, 1],
+    pivotA: size5([0, 0.5 * scale[0], 0.5 * scale[0]]),
+    pivotB: size10([0, 0.5 * scale[0], -0.5 * scale[0]]),
+  })
+
+  const [isWalking, setIsWalking] = useState(false)
+
+  useEffect(() => {
+    const t = setTimeout(() => setIsWalking(true), delay)
+
+    return () => clearTimeout(t)
+  }, [])
+
+  return (
+    <group>
+      {/* Body */}
+      <ConstraintPart
+        ref={bodyRef}
+        mass={1}
+        args={[bodyHeight, bodyWidth, bodyDepth ? bodyDepth + partDepth * 3 : 0]}
+        rotation={[0, 0, Math.PI / 2]}
+        position={[0, 0, bodyDepth]}
+        transparent={!bodyDepth}
+        opacity={Number(!!bodyDepth)}
+      >
+        {/* Upper front leg */}
+        <ConstraintPart
+          ref={frontUpperLegRef}
+          args={[1 * scale[0], 3 * scale[0], partDepth]}
+          position={[-2 * scale[0], 0.5 * scale[0], bodyDepth]}
+          rotation={[0, 0, Math.PI / 3]}
+          pivot={[0, -0.5 * scale[0], -0.5 * scale[0]]}
+          parentPivot={[0, 0.2 * scale[0], 0.5 * scale[0]]}
+          color="#85ffb3"
+        />
+        {/* Crank */}
+        <ConstraintPart
+          enableMotor={isWalking} // Motor enabled here
+          motorSpeed={motorSpeed}
+          args={[0.5 * scale[0], 1 * scale[0], partDepth]}
+          position={[bodyWidth * -0.5, -1.5 / 2 * scale[0], bodyDepth]}
+          parentPivot={[0, 0.5 * scale[0], 0.5 * scale[0]]}
+          pivot={[0, 0.5 * scale[0], -0.5 * scale[0]]}
+          color="black"
+        >
+          {/* Front leg */}
+          <ConstraintPart
+            ref={frontLegRef}
+            args={[1 * scale[0], legLength, partDepth]}
+            position={[bodyWidth * -0.5, -1 * scale[0], bodyDepth]}
+            rotation={[0, 0, Math.PI / -6]}
+            parentPivot={[0, -0.5 * scale[0], 0.5 * scale[0]]}
+            pivot={[0, 0, -0.5 * scale[0]]}
+            color="#85b3ff"
+          >
+            {/* Horizontal bar */}
+            <ConstraintPart
+              ref={horizontalRef}
+              parentPivot={[0, 0, 0.5 * scale[0]]}
+              pivot={[0, -0.5 * scale[0], -0.5 * scale[0]]}
+              args={[1 * scale[0], bodyWidth, partDepth]}
+              position={[0, 0, bodyDepth]}
+              color="#ff85b3"
+              rotation={[0, 0, Math.PI / -2.5]}
+            />
+          </ConstraintPart>
+        </ConstraintPart>
+
+        {/* Back leg */}
+        <ConstraintPart
+          ref={backLegRef}
+          args={[1 * scale[0], legLength, partDepth]}
+          pivot={[0, -0, -1 * scale[0]]}
+          parentPivot={[-0.0, -0.5 * scale[0], 0.5 * scale[0]]}
+          position={[bodyWidth * 0.5, 0, bodyDepth]}
+          rotation={[0, 0, Math.PI / 4]}
+          color="#85b3ff"
+        ></ConstraintPart>
+      </ConstraintPart>
+    </group>
+  )
+})
+
+export function Obstacles() {
+  return (
+    <>
+      <ConstraintPart
+        collisionFilterGroup={GROUP_GROUND}
+        collisionFilterMask={GROUP_BODY | GROUP_GROUND}
+        mass={4}
+        args={[-30, -0.4, 30]}
+        position={[-45, -4, 0]}
+        rotation={[0, Math.PI / -4, 0]}
+        color={'#ffb385'}
+      />
+      <ConstraintPart
+        collisionFilterGroup={GROUP_GROUND}
+        collisionFilterMask={GROUP_BODY | GROUP_GROUND}
+        mass={4}
+        args={[-15, -0.5, 15]}
+        position={[-50, -2, 0]}
+        rotation={[0, Math.PI / -1.25, 0]}
+        color={'#dc9c76'}
+      />
+      <ConstraintPart
+        collisionFilterGroup={GROUP_GROUND}
+        collisionFilterMask={GROUP_BODY | GROUP_GROUND}
+        mass={4}
+        args={[-10, -0.5, 10]}
+        position={[-45, 0, -5]}
+        rotation={[0, Math.PI / 3, 0]}
+        color={'#c58e6e'}
+      />
+    </>
+  )
+}
